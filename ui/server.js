@@ -178,38 +178,36 @@ app.use((req, res, next) => {
 
 app.get('/api/kafka-status', async (req, res) => {
   try {
-    const computed = await computeQueueDepthFromKafka();
-    // Sum messages/sec across services (computed from Kafka timestamps)
+    // Do not compute Kafka queue depth (removed - always returned zero). Return real throughput and pilerRate only.
     const messagesPerSecond = SERVICE_NAMES.reduce((sum, s) => sum + computeMessagesPerSecond(s), 0);
-    let queueDepth = 0;
-    let diagnostics = null;
-    if (computed && typeof computed === 'object') {
-      queueDepth = computed.totalLag || 0;
-      diagnostics = { perPartitionLatest: computed.perPartitionLatest, perGroup: computed.perGroup };
-    } else if (computed === null) {
-      queueDepth = 0;
-    } else {
-      queueDepth = Number(computed || 0);
-    }
     res.json({
       service: 'kafka-message-piler',
       messagesPerSecond,
-      queueDepth,
       pilerRate,
       httpsRequestsServed: currentHttpsRate(),
-      computedFromKafka: Boolean(diagnostics),
-      diagnostics
+      computedFromKafka: false
     });
   } catch (err) {
     res.json({
       service: 'kafka-message-piler',
       messagesPerSecond: SERVICE_NAMES.reduce((sum, s) => sum + computeMessagesPerSecond(s), 0),
-      queueDepth: 0,
       pilerRate,
       httpsRequestsServed: currentHttpsRate(),
-      computedFromKafka: false,
-      diagnostics: { error: err.message }
+      computedFromKafka: false
     });
+  }
+});
+
+// Debug endpoint: return per-partition latest offsets and per-consumer-group committed offsets and lag
+app.get('/api/kafka-lag', async (req, res) => {
+  try {
+    const computed = await computeQueueDepthFromKafka();
+    if (computed === null) {
+      return res.status(500).json({ ok: false, error: 'Unable to compute Kafka lag (admin API failed or brokers unreachable)' });
+    }
+    return res.json({ ok: true, data: computed });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -222,6 +220,16 @@ app.post('/api/piler/change', (req, res) => {
   const delta = Number(req.body?.delta || 0);
   // enforce minimum 100
   pilerRate = Math.max(100, Math.round((pilerRate || 100) + delta));
+  res.json({ ok: true, rate: pilerRate });
+});
+
+// Set piler to an absolute rate (msg/s)
+app.post('/api/piler/set', (req, res) => {
+  const rate = Number(req.body?.rate || 0);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid rate' });
+  }
+  pilerRate = Math.max(100, Math.round(rate));
   res.json({ ok: true, rate: pilerRate });
 });
 

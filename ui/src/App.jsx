@@ -99,6 +99,7 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [kafkaStatus, setKafkaStatus] = useState({ messagesPerSecond: 0, queueDepth: 0, pilerRate: 100 });
+  const [desiredPilerRate, setDesiredPilerRate] = useState(100);
   const [httpsRate, setHttpsRate] = useState(0);
   const [isIncreasingPiler, setIsIncreasingPiler] = useState(false);
 
@@ -283,6 +284,22 @@ export default function App() {
     }
   };
 
+  const setPilerRate = async (rate) => {
+    setIsIncreasingPiler(true);
+    try {
+      await fetch('/api/piler/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rate })
+      });
+      await fetchKafkaStatus();
+    } catch (err) {
+      console.warn('Unable to set piler rate:', err.message);
+    } finally {
+      setIsIncreasingPiler(false);
+    }
+  };
+
   const handleCopyYAML = () => {
     if (!prediction || !activeService) return;
 
@@ -352,16 +369,11 @@ spec:
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
         <div className="bg-slate-900/50 border border-slate-700/60 rounded-2xl p-4">
           <div className="text-xs uppercase tracking-wider text-slate-400">Kafka Message Piler</div>
           <div className="mt-2 text-2xl font-bold text-white">{Math.round(kafkaStatus.messagesPerSecond)} <span className="text-sm text-slate-400">msg/s</span></div>
           <div className="mt-1 text-xs text-slate-400">Messages being piled per second</div>
-        </div>
-        <div className="bg-slate-900/50 border border-slate-700/60 rounded-2xl p-4">
-          <div className="text-xs uppercase tracking-wider text-slate-400">Kafka Queue Depth</div>
-          <div className="mt-2 text-2xl font-bold text-white">{Math.round(kafkaStatus.queueDepth)} <span className="text-sm text-slate-400">queued</span></div>
-          <div className="mt-1 text-xs text-slate-400">Messages currently in queue</div>
         </div>
         <div className="bg-slate-900/50 border border-slate-700/60 rounded-2xl p-4">
           <div className="text-xs uppercase tracking-wider text-slate-400">UI HTTPS Served</div>
@@ -389,6 +401,23 @@ spec:
           >
             +100
           </button>
+          <div className="flex items-center gap-2 ml-4">
+            <input
+              type="number"
+              min="100"
+              step="50"
+              value={desiredPilerRate}
+              onChange={(e) => setDesiredPilerRate(Number(e.target.value))}
+              className="w-24 px-2 py-1 rounded-lg bg-slate-800 text-white border border-slate-700"
+            />
+            <button
+              onClick={() => setPilerRate(desiredPilerRate)}
+              disabled={isIncreasingPiler}
+              className="px-3 py-2 rounded-xl bg-green-600 hover:bg-green-500 text-white font-semibold disabled:opacity-60"
+            >
+              Set
+            </button>
+          </div>
         </div>
       </div>
 
