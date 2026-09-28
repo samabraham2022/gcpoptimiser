@@ -11,6 +11,9 @@ app.use(express.json());
 const bigquery = new BigQuery();
 const KAFKA_TOPIC = process.env.KAFKA_TOPIC || 'gke-utilization';
 const SERVICE_NAMES = ['order-processor', 'payment-gateway', 'notification-worker'];
+const DATASET_ID = process.env.BQ_DATASET || 'gke_metrics';
+const TABLE_ID = process.env.BQ_TABLE || 'training_data';
+const RETRAIN_INTERVAL_MS = Number(process.env.RETRAIN_INTERVAL_MS || 30 * 60 * 1000);
 // No synthetic defaults: metrics come from service endpoints and Kafka offsets
 const liveMetrics = new Map();
 const requestTimestamps = [];
@@ -205,7 +208,98 @@ app.post('/api/piler/change', (req, res) => {
   res.json({ ok: true, rate: pilerRate });
 });
 
-// Removed synthetic piler control endpoints and synthetic metric refresh interval.
+// BigQuery helpers: ensure dataset/table exist and stream rows
+async function ensureDatasetAndTable() {
+  try {
+    const dataset = bigquery.dataset(DATASET_ID);
+    // create dataset if missing
+    const [exists] = await dataset.exists().catch(() => [false]);
+    if (!exists) {
+      await bigquery.createDataset(DATASET_ID);
+      console.log(`Created BigQuery dataset ${DATASET_ID}`);
+    }
+
+    const table = dataset.table(TABLE_ID);
+    const [tableExists] = await table.exists().catch(() => [false]);
+    if (!tableExists) {
+      const schema = [
+        { name: 'event_time', type: 'TIMESTAMP' },
+        { name: 'service', type: 'STRING' },
+        { name: 'cpu', type: 'FLOAT' },
+        { name: 'memory', type: 'INTEGER' },
+        { name: 'cpuUtilization', type: 'FLOAT' },
+        { name: 'ramUtilization', type: 'FLOAT' },
+        { name: 'messagesPerSecond', type: 'INTEGER' },
+        { name: 'requestsPerSecond', type: 'INTEGER' },
+        { name: 'httpsRequestsServed', type: 'INTEGER' },
+        { name: 'queueDepth', type: 'INTEGER' },
+        { name: 'pilerRate', type: 'INTEGER' },
+        { name: 'source', type: 'STRING' }
+      ];
+      await dataset.createTable(TABLE_ID, { schema });
+      console.log(`Created BigQuery table ${DATASET_ID}.${TABLE_ID}`);
+    }
+  } catch (err) {
+    console.warn('BigQuery dataset/table ensure failed:', err.message);
+  }
+}
+
+async function streamMetricsToBigQuery(rows) {
+  if (!rows || !rows.length) return;
+  try {
+    const dataset = bigquery.dataset(DATASET_ID);
+    const table = dataset.table(TABLE_ID);
+    // Insert expects array of objects
+    await table.insert(rows);
+    console.log(`Inserted ${rows.length} rows into ${DATASET_ID}.${TABLE_ID}`);
+  } catch (err) {
+    console.error('BigQuery insert failed:', err.message);
+  }
+}
+
+async function collectAndStreamMetrics() {
+  try {
+    await ensureDatasetAndTable();
+    const nowTs = new Date().toISOString();
+    const kafkaStat = await (async () => { try { const d = await computeQueueDepthFromKafka(); return { queueDepth: d ?? 0, pilerRate }; } catch (e) { return { queueDepth: 0, pilerRate }; } })();
+    const rows = [];
+    for (const service of SERVICE_NAMES) {
+      const metricsFromService = await fetchServiceMetrics(service);
+      const mps = metricsFromService ? Number(metricsFromService.messagesPerSecond || computeMessagesPerSecond(service)) : computeMessagesPerSecond(service);
+      rows.push({ event_time: nowTs, service, cpu: metricsFromService ? Number(metricsFromService.cpu) : null, memory: metricsFromService ? Number(metricsFromService.memory) : null, cpuUtilization: metricsFromService ? Number(metricsFromService.cpuUtilization) : null, ramUtilization: metricsFromService ? Number(metricsFromService.ramUtilization) : null, messagesPerSecond: mps, requestsPerSecond: metricsFromService ? Number(metricsFromService.requestsPerSecond || 0) : null, httpsRequestsServed: metricsFromService ? Number(metricsFromService.httpsRequestsServed || 0) : null, queueDepth: kafkaStat.queueDepth, pilerRate: kafkaStat.pilerRate, source: 'bff' });
+    }
+    // aggregate piler row
+    rows.push({ event_time: nowTs, service: 'kafka-piler', cpu: null, memory: null, cpuUtilization: null, ramUtilization: null, messagesPerSecond: rows.reduce((s, r) => s + (Number(r.messagesPerSecond || 0)), 0), requestsPerSecond: null, httpsRequestsServed: currentHttpsRate(), queueDepth: kafkaStat.queueDepth, pilerRate: kafkaStat.pilerRate, source: 'bff' });
+    await streamMetricsToBigQuery(rows);
+  } catch (err) {
+    console.error('collectAndStreamMetrics failed:', err.message);
+  }
+}
+
+async function retrainModels() {
+  try {
+    console.log('Starting BigQuery ML retrain jobs...');
+    const cpuQuery = `CREATE OR REPLACE MODEL \`${DATASET_ID}.model_cpu\` OPTIONS(model_type='linear_reg', input_label_cols=['cpu']) AS SELECT messagesPerSecond AS messages_per_second, service AS microservice_name, cpu AS cpu FROM \`${DATASET_ID}.${TABLE_ID}\` WHERE cpu IS NOT NULL`;
+    const memQuery = `CREATE OR REPLACE MODEL \`${DATASET_ID}.model_memory\` OPTIONS(model_type='linear_reg', input_label_cols=['memory']) AS SELECT messagesPerSecond AS messages_per_second, service AS microservice_name, memory AS memory FROM \`${DATASET_ID}.${TABLE_ID}\` WHERE memory IS NOT NULL`;
+    await bigquery.createQueryJob({ query: cpuQuery });
+    await bigquery.createQueryJob({ query: memQuery });
+    console.log('Submitted retrain jobs to BigQuery');
+  } catch (err) {
+    console.error('Retrain failed:', err.message);
+  }
+}
+
+// Schedule periodic collection and retrain every RETRAIN_INTERVAL_MS
+setInterval(async () => {
+  await collectAndStreamMetrics();
+  await retrainModels();
+}, RETRAIN_INTERVAL_MS);
+
+// Run initial collect and retrain
+collectAndStreamMetrics().catch(() => {});
+setTimeout(() => retrainModels().catch(() => {}), 5000);
+
+// start consumer after setting up BQ jobs
 startKafkaConsumer();
 
 // Initialize Kubernetes in-cluster client with fallback
