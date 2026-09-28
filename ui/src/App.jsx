@@ -120,7 +120,7 @@ export default function App() {
       const liveMetricsMap = new Map((metricsData.services || []).map((item) => [item.id, item]));
 
       if (Array.isArray(servicesData.services) && servicesData.services.length > 0) {
-        const merged = servicesData.services.map((podName, idx) => {
+          const merged = servicesData.services.map((podName, idx) => {
           const matched = BASE_CATALOG.find((s) => podName.startsWith(s.id));
           const baseService = matched || {
             id: podName,
@@ -132,13 +132,13 @@ export default function App() {
 
           const liveMetrics = liveMetricsMap.get(baseService.id) || null;
           const current = {
-            cpu: liveMetrics ? Number(liveMetrics.cpu || baseService.current.cpu) : baseService.current.cpu,
-            mem: liveMetrics ? Number(liveMetrics.memory || baseService.current.mem) : baseService.current.mem,
-            mps: liveMetrics ? Number(liveMetrics.messagesPerSecond || baseService.current.mps) : baseService.current.mps,
-            requestsPerSecond: liveMetrics ? Number(liveMetrics.requestsPerSecond || baseService.current.requestsPerSecond || 0) : (baseService.current.requestsPerSecond || 0),
-            httpsRequestsServed: liveMetrics ? Number(liveMetrics.httpsRequestsServed || baseService.current.httpsRequestsServed || 0) : (baseService.current.httpsRequestsServed || 0),
-            cpuUtilization: liveMetrics ? Number(liveMetrics.cpuUtilization || ((Number(liveMetrics.cpu || baseService.current.cpu) / MAX_CPU) * 100)) : ((baseService.current.cpu / MAX_CPU) * 100),
-            ramUtilization: liveMetrics ? Number(liveMetrics.ramUtilization || ((Number(liveMetrics.memory || baseService.current.mem) / MAX_MEM) * 100)) : ((baseService.current.mem / MAX_MEM) * 100)
+            cpu: Number(liveMetrics?.cpu ?? baseService.current.cpu),
+            mem: Number(liveMetrics?.memory ?? baseService.current.mem),
+            mps: Number(liveMetrics?.messagesPerSecond ?? baseService.current.mps),
+            requestsPerSecond: Number(liveMetrics?.requestsPerSecond ?? baseService.current.requestsPerSecond ?? 0),
+            httpsRequestsServed: Number(liveMetrics?.httpsRequestsServed ?? baseService.current.httpsRequestsServed ?? 0),
+            cpuUtilization: Number(liveMetrics?.cpuUtilization ?? ((Number(liveMetrics?.cpu ?? baseService.current.cpu) / MAX_CPU) * 100)),
+            ramUtilization: Number(liveMetrics?.ramUtilization ?? ((Number(liveMetrics?.memory ?? baseService.current.mem) / MAX_MEM) * 100))
           };
 
           return { ...baseService, current, livePodName: podName };
@@ -146,17 +146,17 @@ export default function App() {
         setServices(merged);
       } else {
         const fallback = BASE_CATALOG.map((service) => {
-          const liveMetrics = liveMetricsMap.get(service.id);
+          const liveMetrics = liveMetricsMap.get(service.id) || null;
           return {
             ...service,
             current: {
-              cpu: liveMetrics ? Number(liveMetrics.cpu || service.current.cpu) : service.current.cpu,
-              mem: liveMetrics ? Number(liveMetrics.memory || service.current.mem) : service.current.mem,
-              mps: liveMetrics ? Number(liveMetrics.messagesPerSecond || service.current.mps) : service.current.mps,
-              requestsPerSecond: liveMetrics ? Number(liveMetrics.requestsPerSecond || service.current.requestsPerSecond || 0) : (service.current.requestsPerSecond || 0),
-              httpsRequestsServed: liveMetrics ? Number(liveMetrics.httpsRequestsServed || service.current.httpsRequestsServed || 0) : (service.current.httpsRequestsServed || 0),
-              cpuUtilization: liveMetrics ? Number(liveMetrics.cpuUtilization || ((Number(liveMetrics.cpu || service.current.cpu) / MAX_CPU) * 100)) : ((service.current.cpu / MAX_CPU) * 100),
-              ramUtilization: liveMetrics ? Number(liveMetrics.ramUtilization || ((Number(liveMetrics.memory || service.current.mem) / MAX_MEM) * 100)) : ((service.current.mem / MAX_MEM) * 100)
+              cpu: Number(liveMetrics?.cpu ?? service.current.cpu),
+              mem: Number(liveMetrics?.memory ?? service.current.mem),
+              mps: Number(liveMetrics?.messagesPerSecond ?? service.current.mps),
+              requestsPerSecond: Number(liveMetrics?.requestsPerSecond ?? service.current.requestsPerSecond ?? 0),
+              httpsRequestsServed: Number(liveMetrics?.httpsRequestsServed ?? service.current.httpsRequestsServed ?? 0),
+              cpuUtilization: Number(liveMetrics?.cpuUtilization ?? ((Number(liveMetrics?.cpu ?? service.current.cpu) / MAX_CPU) * 100)),
+              ramUtilization: Number(liveMetrics?.ramUtilization ?? ((Number(liveMetrics?.memory ?? service.current.mem) / MAX_MEM) * 100))
             }
           };
         });
@@ -175,9 +175,9 @@ export default function App() {
       if (!res.ok) return;
       const data = await res.json();
       setKafkaStatus({
-        messagesPerSecond: Number(data.messagesPerSecond || 0),
-        queueDepth: Number(data.queueDepth || 0),
-        pilerRate: Number(data.pilerRate || data.piler_rate || 100)
+        messagesPerSecond: Number(data.messagesPerSecond ?? 0),
+        queueDepth: Number(data.queueDepth ?? 0),
+        pilerRate: Number(data.pilerRate ?? data.piler_rate ?? 100)
       });
     } catch (err) {
       console.warn('Kafka status unavailable:', err.message);
@@ -189,7 +189,7 @@ export default function App() {
       const res = await fetch('/api/https-requests');
       if (!res.ok) return;
       const data = await res.json();
-      setHttpsRate(Number(data.requestsPerSecond || 0));
+      setHttpsRate(Number(data.requestsPerSecond ?? 0));
     } catch (err) {
       console.warn('HTTPS rate unavailable:', err.message);
     }
@@ -271,12 +271,19 @@ export default function App() {
   const changePilerRate = async (delta) => {
     setIsIncreasingPiler(true);
     try {
-      await fetch('/api/piler/change', {
+      const res = await fetch('/api/piler/change', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ delta })
       });
-      await fetchKafkaStatus();
+      if (res.ok) {
+        const data = await res.json();
+        const newRate = Number(data.rate ?? data.rate ?? kafkaStatus.pilerRate);
+        setDesiredPilerRate(newRate);
+        await fetchKafkaStatus();
+      } else {
+        await fetchKafkaStatus();
+      }
     } catch (err) {
       console.warn('Unable to change piler rate:', err.message);
     } finally {
@@ -287,12 +294,19 @@ export default function App() {
   const setPilerRate = async (rate) => {
     setIsIncreasingPiler(true);
     try {
-      await fetch('/api/piler/set', {
+      const res = await fetch('/api/piler/set', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rate })
       });
-      await fetchKafkaStatus();
+      if (res.ok) {
+        const data = await res.json();
+        const newRate = Number(data.rate ?? kafkaStatus.pilerRate);
+        setDesiredPilerRate(newRate);
+        await fetchKafkaStatus();
+      } else {
+        await fetchKafkaStatus();
+      }
     } catch (err) {
       console.warn('Unable to set piler rate:', err.message);
     } finally {
@@ -445,38 +459,38 @@ spec:
               <div>
                 <div className="flex justify-between text-xs text-slate-500 mb-1 font-mono">
                   <span>Current CPU</span>
-                  <span className="text-slate-300">{Number(service.current.cpu || 0).toFixed(2)} Cores</span>
+                  <span className="text-slate-300">{Number(service.current.cpu ?? 0).toFixed(2)} Cores</span>
                 </div>
                 <div className="w-full bg-slate-950 rounded-full h-1.5 border border-slate-800">
-                  <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: `${Math.min(100, (Number(service.current.cpu || 0) / MAX_CPU) * 100)}%` }}></div>
+                  <div className="bg-blue-500 h-1.5 rounded-full" style={{ width: `${Math.min(100, (Number(service.current.cpu ?? 0) / MAX_CPU) * 100)}%` }}></div>
                 </div>
-                <div className="mt-1 text-[10px] text-slate-400 font-mono">CPU Utilization: {Number(service.current.cpuUtilization || ((Number(service.current.cpu || 0) / MAX_CPU) * 100)).toFixed(1)}%</div>
+                <div className="mt-1 text-[10px] text-slate-400 font-mono">CPU Utilization: {Number(service.current.cpuUtilization ?? ((Number(service.current.cpu ?? 0) / MAX_CPU) * 100)).toFixed(1)}%</div>
               </div>
               <div>
                 <div className="flex justify-between text-xs text-slate-500 mb-1 font-mono">
                   <span>Current RAM</span>
-                  <span className="text-slate-300">{Math.round(Number(service.current.mem || 0))} MiB</span>
+                  <span className="text-slate-300">{Math.round(Number(service.current.mem ?? 0))} MiB</span>
                 </div>
                 <div className="w-full bg-slate-950 rounded-full h-1.5 border border-slate-800">
-                  <div className="bg-indigo-500 h-1.5 rounded-full" style={{ width: `${Math.min(100, (Number(service.current.mem || 0) / MAX_MEM) * 100)}%` }}></div>
+                  <div className="bg-indigo-500 h-1.5 rounded-full" style={{ width: `${Math.min(100, (Number(service.current.mem ?? 0) / MAX_MEM) * 100)}%` }}></div>
                 </div>
-                <div className="mt-1 text-[10px] text-slate-400 font-mono">RAM Utilization: {Number(service.current.ramUtilization || ((Number(service.current.mem || 0) / MAX_MEM) * 100)).toFixed(1)}%</div>
+                <div className="mt-1 text-[10px] text-slate-400 font-mono">RAM Utilization: {Number(service.current.ramUtilization ?? ((Number(service.current.mem ?? 0) / MAX_MEM) * 100)).toFixed(1)}%</div>
               </div>
               <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-950/50 p-2 rounded-lg border border-slate-800/50">
                 <BarChart3 className="w-3.5 h-3.5 text-slate-500" />
                 {service.kafkaConsumer ? (
                   <>
-                    Current Kafka Throughput: <span className="font-mono text-white">{Math.round(Number(service.current.mps || 0))} msg/s</span>
+                    Current Kafka Throughput: <span className="font-mono text-white">{Math.round(Number(service.current.mps ?? 0))} msg/s</span>
                   </>
                 ) : (
                   <>
-                    Requests served: <span className="font-mono text-white">{Math.round(Number(service.current.requestsPerSecond || 0))} req/s</span>
+                    Requests served: <span className="font-mono text-white">{Math.round(Number(service.current.requestsPerSecond ?? 0))} req/s</span>
                   </>
                 )}
               </div>
               <div className="mt-3 flex items-center gap-2 text-xs text-slate-400 bg-slate-950/50 p-2 rounded-lg border border-slate-800/50">
                 <Cloud className="w-3.5 h-3.5 text-slate-500" />
-                HTTPS served: <span className="font-mono text-white">{Math.round(Number(service.current.httpsRequestsServed || 0))} req/s</span>
+                HTTPS served: <span className="font-mono text-white">{Math.round(Number(service.current.httpsRequestsServed ?? 0))} req/s</span>
               </div>
             </div>
 
