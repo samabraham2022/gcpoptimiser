@@ -31,7 +31,9 @@ function computeRate() {
   while (recentTimestamps.length && now - recentTimestamps[0] > rateWindowMs) {
     recentTimestamps.shift();
   }
-  return recentTimestamps.length;
+  // Convert count in sliding window to messages per second
+  const windowSeconds = rateWindowMs / 1000;
+  return Math.round(recentTimestamps.length / windowSeconds);
 }
 
 function updateSnapshotFromMessage(payload) {
