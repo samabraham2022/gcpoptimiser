@@ -41,22 +41,46 @@ async function start() {
     await producer.connect();
     console.log(`Kafka message piler connected to ${kafkaBrokers.join(', ')}`);
 
+    // Desired total messages per second (across all services). Can be overridden by BFF /api/piler
+    let desiredRate = Number(process.env.PILE_RATE || process.env.INIT_PILER_RATE || 100);
+    const bffUrl = process.env.BFF_URL || 'http://localhost:3000';
+
+    // Poll BFF for desired rate every 5s
     setInterval(async () => {
       try {
+        const http = require('http');
+        http.get(`${bffUrl}/api/piler`, (res) => {
+          let data = '';
+          res.on('data', (chunk) => data += chunk);
+          res.on('end', () => {
+            try {
+              const obj = JSON.parse(data);
+              if (obj?.rate) desiredRate = Number(obj.rate);
+            } catch (e) { /* ignore */ }
+          });
+        }).on('error', () => {});
+      } catch (e) {}
+    }, 5000);
+
+    // Emit messages at roughly desiredRate per second
+    setInterval(async () => {
+      try {
+        // messages per service per interval (1s)
+        const perService = Math.max(1, Math.round(desiredRate / services.length));
         for (let i = 0; i < services.length; i++) {
-          const batchSize = 12;
-          for (let burst = 0; burst < batchSize; burst++) {
-            const payload = makePayload(services[i], i + burst);
-            await producer.send({
-              topic,
-              messages: [{ value: JSON.stringify(payload) }]
-            });
+          const msgs = [];
+          for (let n = 0; n < perService; n++) {
+            const payload = makePayload(services[i], i + n + Math.floor(Math.random() * 1000));
+            msgs.push({ value: JSON.stringify(payload) });
+          }
+          if (msgs.length) {
+            await producer.send({ topic, messages: msgs });
           }
         }
       } catch (err) {
         console.error('Failed to publish Kafka telemetry message:', err.message);
       }
-    }, 500);
+    }, 1000);
   } catch (err) {
     console.error('Kafka producer failed to start:', err.message);
     process.exit(1);

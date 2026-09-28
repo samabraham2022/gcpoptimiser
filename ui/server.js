@@ -17,6 +17,8 @@ const requestTimestamps = [];
 
 // Track recent Kafka message timestamps per service to compute real throughput
 const recentTimestampsByService = new Map();
+// Piler control: desired messages per second (total across services)
+let pilerRate = Number(process.env.INIT_PILER_RATE || 100);
 
 async function fetchServiceMetrics(serviceName) {
   try {
@@ -175,6 +177,7 @@ app.get('/api/kafka-status', async (req, res) => {
       service: 'kafka-message-piler',
       messagesPerSecond,
       queueDepth: computedDepth !== null ? computedDepth : 0,
+      pilerRate,
       httpsRequestsServed: currentHttpsRate(),
       computedFromKafka: computedDepth !== null
     });
@@ -183,10 +186,23 @@ app.get('/api/kafka-status', async (req, res) => {
       service: 'kafka-message-piler',
       messagesPerSecond: SERVICE_NAMES.reduce((sum, s) => sum + computeMessagesPerSecond(s), 0),
       queueDepth: 0,
+      pilerRate,
       httpsRequestsServed: currentHttpsRate(),
       computedFromKafka: false
     });
   }
+});
+
+// Piler control endpoints
+app.get('/api/piler', (req, res) => {
+  res.json({ rate: pilerRate });
+});
+
+app.post('/api/piler/change', (req, res) => {
+  const delta = Number(req.body?.delta || 0);
+  // enforce minimum 100
+  pilerRate = Math.max(100, Math.round((pilerRate || 100) + delta));
+  res.json({ ok: true, rate: pilerRate });
 });
 
 // Removed synthetic piler control endpoints and synthetic metric refresh interval.

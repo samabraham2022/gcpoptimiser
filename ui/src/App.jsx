@@ -98,7 +98,7 @@ export default function App() {
   const [prediction, setPrediction] = useState(null);
   const [copied, setCopied] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
-  const [kafkaStatus, setKafkaStatus] = useState({ messagesPerSecond: 0, queueDepth: 0, multiplier: 1 });
+  const [kafkaStatus, setKafkaStatus] = useState({ messagesPerSecond: 0, queueDepth: 0, pilerRate: 100 });
   const [httpsRate, setHttpsRate] = useState(0);
   const [isIncreasingPiler, setIsIncreasingPiler] = useState(false);
 
@@ -176,7 +176,7 @@ export default function App() {
       setKafkaStatus({
         messagesPerSecond: Number(data.messagesPerSecond || 0),
         queueDepth: Number(data.queueDepth || 0),
-        multiplier: Number(data.multiplier || 1)
+        pilerRate: Number(data.pilerRate || data.piler_rate || 100)
       });
     } catch (err) {
       console.warn('Kafka status unavailable:', err.message);
@@ -267,17 +267,17 @@ export default function App() {
     }
   };
 
-  const increasePilerRate = async () => {
+  const changePilerRate = async (delta) => {
     setIsIncreasingPiler(true);
     try {
-      await fetch('/api/increase-piler-rate', {
+      await fetch('/api/piler/change', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ factor: 1.5 })
+        body: JSON.stringify({ delta })
       });
       await fetchKafkaStatus();
     } catch (err) {
-      console.warn('Unable to increase piler rate:', err.message);
+      console.warn('Unable to change piler rate:', err.message);
     } finally {
       setIsIncreasingPiler(false);
     }
@@ -370,14 +370,26 @@ spec:
         </div>
       </div>
 
-      <div className="flex justify-end mb-6">
-        <button
-          onClick={increasePilerRate}
-          disabled={isIncreasingPiler}
-          className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold disabled:opacity-60"
-        >
-          {isIncreasingPiler ? 'Increasing pile rate...' : `Increase pile rate (${kafkaStatus.multiplier.toFixed(1)}x)`}
-        </button>
+      <div className="flex justify-end items-center gap-3 mb-6">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => changePilerRate(-100)}
+            disabled={isIncreasingPiler || (kafkaStatus.pilerRate <= 100)}
+            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold disabled:opacity-40"
+          >
+            -100
+          </button>
+          <div className="px-4 py-2 bg-slate-800/50 rounded-lg border border-slate-700/50 text-sm font-mono text-slate-300">
+            Pile rate: {kafkaStatus.pilerRate} msg/s
+          </div>
+          <button
+            onClick={() => changePilerRate(100)}
+            disabled={isIncreasingPiler}
+            className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold disabled:opacity-60"
+          >
+            +100
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
