@@ -80,17 +80,23 @@ async function start() {
     // Emit messages at roughly desiredRate per second. Send all messages in one batch to avoid sequential awaits.
     setInterval(async () => {
       try {
-        const perService = Math.max(1, Math.round(desiredRate / services.length));
+        // Distribute desiredRate across services, preserving exact total.
+        let base = Math.floor(desiredRate / services.length);
+        if (base < 1) base = 1; // ensure at least one per service for safety
+        let remainder = desiredRate - (base * services.length);
+        if (remainder < 0) remainder = 0;
+        const perServiceCounts = services.map(() => (remainder > 0 ? (remainder--, base + 1) : base));
         const allMsgs = [];
         for (let i = 0; i < services.length; i++) {
-          for (let n = 0; n < perService; n++) {
+          const count = perServiceCounts[i];
+          for (let n = 0; n < count; n++) {
             const payload = makePayload(services[i], i + n + Math.floor(Math.random() * 1000));
             allMsgs.push({ value: JSON.stringify(payload) });
           }
         }
         if (allMsgs.length) {
           await producer.send({ topic, messages: allMsgs });
-          console.log(`Piler sent ${allMsgs.length} messages (desiredRate=${desiredRate})`);
+          console.log(`Piler sent ${allMsgs.length} messages (desiredRate=${desiredRate}, perService=[${perServiceCounts.join(',')}])`);
         }
       } catch (err) {
         console.error('Failed to publish Kafka telemetry message:', err.message);
