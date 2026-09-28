@@ -11,24 +11,12 @@ app.use(express.json());
 const bigquery = new BigQuery();
 const KAFKA_TOPIC = process.env.KAFKA_TOPIC || 'gke-utilization';
 const SERVICE_NAMES = ['order-processor', 'payment-gateway', 'notification-worker'];
-const NON_KAFKA_SERVICES = {
-  'trade-execution-engine': { cpu: 4.0, memory: 4096, cpuUtilization: 58, ramUtilization: 52, requestsPerSecond: 980, httpsRequestsServed: 960 },
-  'batch-processor-pipeline': { cpu: 3.3, memory: 6144, cpuUtilization: 64, ramUtilization: 59, requestsPerSecond: 620, httpsRequestsServed: 610 }
-};
+// No synthetic defaults: metrics come from service endpoints and Kafka offsets
 const liveMetrics = new Map();
 const requestTimestamps = [];
-const pilerStatus = {
-  messagesPerSecond: 420,
-  queueDepth: 1500,
-  multiplier: 1
-};
-const baseMetrics = {
-  'order-processor': { cpu: 1.4, memory: 1024, cpuUtilization: 32, ramUtilization: 24, messagesPerSecond: 420, requestsPerSecond: 180, httpsRequestsServed: 150 },
-  'payment-gateway': { cpu: 2.6, memory: 2048, cpuUtilization: 48, ramUtilization: 38, messagesPerSecond: 780, requestsPerSecond: 220, httpsRequestsServed: 190 },
-  'notification-worker': { cpu: 0.8, memory: 768, cpuUtilization: 22, ramUtilization: 18, messagesPerSecond: 210, requestsPerSecond: 140, httpsRequestsServed: 130 }
-};
 
-SERVICE_NAMES.forEach((name) => liveMetrics.set(name, { ...baseMetrics[name] }));
+// Track recent Kafka message timestamps per service to compute real throughput
+const recentTimestampsByService = new Map();
 
 async function fetchServiceMetrics(serviceName) {
   try {
@@ -54,51 +42,7 @@ async function fetchServiceMetrics(serviceName) {
 }
 
 function refreshSyntheticMetrics() {
-  const now = Date.now() / 1000;
-  const recentWindowMs = 10 * 1000;
-  while (requestTimestamps.length && Date.now() - requestTimestamps[0] > recentWindowMs) {
-    requestTimestamps.shift();
-  }
-
-  SERVICE_NAMES.forEach((service, index) => {
-    const current = liveMetrics.get(service) || { ...baseMetrics[service] };
-    const cpuWave = Math.sin(now / 6 + index) * 0.7;
-    const memWave = Math.cos(now / 7 + index) * 200;
-    const mpsWave = Math.sin(now / 4 + index) * 140;
-
-    const cpu = Math.max(0.2, current.cpu + cpuWave * 0.25);
-    const memory = Math.max(256, current.memory + memWave * 0.12);
-    const messagesPerSecond = Math.max(60, current.messagesPerSecond + mpsWave * 0.7);
-    const requestsPerSecond = Math.max(80, current.requestsPerSecond + Math.sin(now / 5 + index) * 25 + (requestTimestamps.length / 5));
-    const httpsRequestsServed = Math.max(70, current.httpsRequestsServed + Math.cos(now / 6 + index) * 18 + (requestTimestamps.length / 6));
-
-    liveMetrics.set(service, {
-      cpu: Number(cpu.toFixed(2)),
-      memory: Math.round(memory),
-      cpuUtilization: Number(Math.min(100, Math.max(10, (cpu / 8) * 100)).toFixed(1)),
-      ramUtilization: Number(Math.min(100, Math.max(10, (memory / 8192) * 100)).toFixed(1)),
-      messagesPerSecond: Math.round(messagesPerSecond),
-      requestsPerSecond: Math.round(requestsPerSecond),
-      httpsRequestsServed: Math.round(httpsRequestsServed)
-    });
-  });
-
-  Object.entries(NON_KAFKA_SERVICES).forEach(([service, metrics], idx) => {
-    const current = liveMetrics.get(service) || { ...metrics };
-    const requestWave = Math.sin(now / 3 + idx) * 110;
-    const httpsWave = Math.cos(now / 4 + idx) * 90;
-    const nextReqs = Math.max(300, (metrics.requestsPerSecond || 300) + requestWave + (requestTimestamps.length / 4));
-    const nextHttps = Math.max(250, (metrics.httpsRequestsServed || 250) + httpsWave + (requestTimestamps.length / 5));
-
-    liveMetrics.set(service, {
-      cpu: Number((metrics.cpu || current.cpu || 2.5).toFixed(2)),
-      memory: Number(metrics.memory || current.memory || 2048),
-      cpuUtilization: Number((metrics.cpuUtilization || current.cpuUtilization || 45).toFixed(1)),
-      ramUtilization: Number((metrics.ramUtilization || current.ramUtilization || 40).toFixed(1)),
-      requestsPerSecond: Math.round(nextReqs),
-      httpsRequestsServed: Math.round(nextHttps)
-    });
-  });
+  // No-op: removed synthetic metric refresh. Metrics are updated from service endpoints and Kafka consumer.
 }
 
 async function startKafkaConsumer() {
@@ -120,15 +64,23 @@ async function startKafkaConsumer() {
           const payload = JSON.parse(message.value.toString());
           const service = payload.service || 'order-processor';
           if (!liveMetrics.has(service)) {
-            liveMetrics.set(service, { ...baseMetrics['order-processor'] });
+              liveMetrics.set(service, {});
           }
           liveMetrics.set(service, {
             cpu: Number(payload.cpu_cores_utilized ?? liveMetrics.get(service).cpu),
             memory: Number(payload.memory_mib_utilized ?? liveMetrics.get(service).memory),
             cpuUtilization: Number(payload.cpu_utilization ?? liveMetrics.get(service).cpuUtilization),
             ramUtilization: Number(payload.ram_utilization ?? liveMetrics.get(service).ramUtilization),
-            messagesPerSecond: Number(payload.messages_per_second ?? liveMetrics.get(service).messagesPerSecond)
+              // messagesPerSecond will be computed from recent timestamps
           });
+          // Track timestamps for throughput calculation
+          try {
+            const arr = recentTimestampsByService.get(service) || [];
+            arr.push(Date.now());
+            recentTimestampsByService.set(service, arr);
+          } catch (e) {
+            // ignore
+          }
         } catch (err) {
           console.error('Unable to parse Kafka telemetry message:', err.message);
         }
@@ -140,6 +92,51 @@ async function startKafkaConsumer() {
   }
 }
 
+// Compute queue depth using Kafka offsets for each service consumer group.
+async function computeQueueDepthFromKafka() {
+  const brokers = (process.env.KAFKA_BROKERS || 'kafka-service:9092').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!brokers.length) return null;
+
+  try {
+    const kafka = new Kafka({ clientId: 'gke-queue-inspector', brokers, retry: { initialRetryTime: 300, retries: 2 } });
+    const admin = kafka.admin();
+    await admin.connect();
+
+    // Get latest offsets for topic partitions
+    const topicOffsets = await admin.fetchTopicOffsets(KAFKA_TOPIC);
+    // topicOffsets: [{ partition: '0', offset: '123' }, ...]
+    const latestPerPartition = topicOffsets.reduce((acc, p) => {
+      acc[Number(p.partition)] = Number(p.offset);
+      return acc;
+    }, {});
+
+    // For each service, fetch the committed offsets for its consumer group and sum the lag
+    let totalLag = 0;
+    for (const service of SERVICE_NAMES) {
+      const groupId = `gke-${service}-group`;
+      try {
+        const groupOffsets = await admin.fetchOffsets({ groupId, topic: KAFKA_TOPIC });
+        // groupOffsets: [{ partition: '0', offset: '42', metadata: null }, ...]
+        for (const p of groupOffsets) {
+          const partition = Number(p.partition);
+          const committed = Number(p.offset === '-1' ? 0 : p.offset);
+          const latest = Number(latestPerPartition[partition] || 0);
+          const lag = Math.max(0, latest - committed);
+          totalLag += lag;
+        }
+      } catch (e) {
+        // If group not found or fetch failed, ignore this group
+        continue;
+      }
+    }
+
+    await admin.disconnect();
+    return totalLag;
+  } catch (err) {
+    return null;
+  }
+}
+
 function currentHttpsRate() {
   const windowMs = 15000;
   while (requestTimestamps.length && Date.now() - requestTimestamps[0] > windowMs) {
@@ -148,15 +145,19 @@ function currentHttpsRate() {
   return requestTimestamps.length;
 }
 
-function getKafkaPilerMetrics() {
-  const adjustedRate = Math.max(100, Math.round((pilerStatus.messagesPerSecond || 420) * (pilerStatus.multiplier || 1)));
-  const queueDelta = Math.max(0, Math.round((pilerStatus.queueDepth || 1500) * (pilerStatus.multiplier || 1) / 6));
-  return {
-    messagesPerSecond: adjustedRate,
-    queueDepth: Math.max(120, Math.min(50000, (pilerStatus.queueDepth || 1500) + queueDelta)),
-    multiplier: Number(pilerStatus.multiplier || 1)
-  };
+function computeMessagesPerSecond(service) {
+  const windowMs = 15000;
+  const now = Date.now();
+  const arr = recentTimestampsByService.get(service) || [];
+  while (arr.length && now - arr[0] > windowMs) {
+    arr.shift();
+  }
+  recentTimestampsByService.set(service, arr);
+  // rate in messages per second
+  return Math.round((arr.length / windowMs) * 1000);
 }
+
+// Removed synthetic piler metrics; queue depth is derived from Kafka offsets.
 
 app.use((req, res, next) => {
   if (req.path !== '/health' && !req.path.startsWith('/static') && !req.path.startsWith('/favicon')) {
@@ -166,31 +167,29 @@ app.use((req, res, next) => {
 });
 
 app.get('/api/kafka-status', async (req, res) => {
-  const fallback = getKafkaPilerMetrics();
-  res.json({
-    service: 'kafka-message-piler',
-    messagesPerSecond: fallback.messagesPerSecond,
-    queueDepth: fallback.queueDepth,
-    multiplier: fallback.multiplier,
-    httpsRequestsServed: currentHttpsRate()
-  });
+  try {
+    const computedDepth = await computeQueueDepthFromKafka();
+    // Sum messages/sec across services (computed from Kafka timestamps)
+    const messagesPerSecond = SERVICE_NAMES.reduce((sum, s) => sum + computeMessagesPerSecond(s), 0);
+    res.json({
+      service: 'kafka-message-piler',
+      messagesPerSecond,
+      queueDepth: computedDepth !== null ? computedDepth : 0,
+      httpsRequestsServed: currentHttpsRate(),
+      computedFromKafka: computedDepth !== null
+    });
+  } catch (err) {
+    res.json({
+      service: 'kafka-message-piler',
+      messagesPerSecond: SERVICE_NAMES.reduce((sum, s) => sum + computeMessagesPerSecond(s), 0),
+      queueDepth: 0,
+      httpsRequestsServed: currentHttpsRate(),
+      computedFromKafka: false
+    });
+  }
 });
 
-app.post('/api/increase-piler-rate', (req, res) => {
-  const nextFactor = Number(req.body?.factor || 1.5);
-  pilerStatus.multiplier = Number((pilerStatus.multiplier || 1) * nextFactor).toFixed(2);
-  pilerStatus.messagesPerSecond = Math.max(500, Math.round((pilerStatus.messagesPerSecond || 420) * nextFactor));
-  pilerStatus.queueDepth = Math.max(1500, Math.round((pilerStatus.queueDepth || 1500) * nextFactor));
-
-  res.json({
-    ok: true,
-    messagesPerSecond: pilerStatus.messagesPerSecond,
-    queueDepth: pilerStatus.queueDepth,
-    multiplier: Number(pilerStatus.multiplier)
-  });
-});
-
-setInterval(refreshSyntheticMetrics, 4000);
+// Removed synthetic piler control endpoints and synthetic metric refresh interval.
 startKafkaConsumer();
 
 // Initialize Kubernetes in-cluster client with fallback
@@ -215,22 +214,24 @@ app.get('/api/live-metrics', async (req, res) => {
         memory: Number(metricsFromService.memory),
         cpuUtilization: Number(metricsFromService.cpuUtilization),
         ramUtilization: Number(metricsFromService.ramUtilization),
-        messagesPerSecond: Number(metricsFromService.messagesPerSecond || 0),
+        messagesPerSecond: Number(metricsFromService.messagesPerSecond || computeMessagesPerSecond(service)),
         requestsPerSecond: Number(metricsFromService.requestsPerSecond || 0),
-        httpsRequestsServed: Number(metricsFromService.httpsRequestsServed || 0)
+        httpsRequestsServed: Number(metricsFromService.httpsRequestsServed || 0),
+        available: true
       });
     } else {
-      const metrics = liveMetrics.get(service) || { ...baseMetrics[service] };
+      const metrics = liveMetrics.get(service) || {};
       serviceMetrics.push({
         id: service,
         name: service.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-        cpu: Number(metrics.cpu),
-        memory: Number(metrics.memory),
-        cpuUtilization: Number(metrics.cpuUtilization),
-        ramUtilization: Number(metrics.ramUtilization),
-        messagesPerSecond: Number(metrics.messagesPerSecond || 0),
-        requestsPerSecond: Number(metrics.requestsPerSecond || 0),
-        httpsRequestsServed: Number(metrics.httpsRequestsServed || 0)
+        cpu: metrics.cpu ?? null,
+        memory: metrics.memory ?? null,
+        cpuUtilization: metrics.cpuUtilization ?? null,
+        ramUtilization: metrics.ramUtilization ?? null,
+        messagesPerSecond: computeMessagesPerSecond(service),
+        requestsPerSecond: metrics.requestsPerSecond ?? null,
+        httpsRequestsServed: metrics.httpsRequestsServed ?? null,
+        available: false
       });
     }
   }
