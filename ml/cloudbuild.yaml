@@ -1,0 +1,16 @@
+steps:
+  - name: 'python:3.9-slim'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "Installing dependencies..."
+        pip install -r requirements.txt
+        
+        echo "Generating BigQuery Data..."
+        python data_generator.py
+        
+        echo "Training BigQuery ML Models..."
+        python bqml_pipeline.py
+    env:
+      - 'PROJECT_ID=$_PROJECT_ID'

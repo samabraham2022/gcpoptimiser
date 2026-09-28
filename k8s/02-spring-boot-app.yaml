@@ -1,0 +1,152 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-processor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-processor
+  template:
+    metadata:
+      labels:
+        app: order-processor
+    spec:
+      imagePullSecrets:
+      - name: artifact-registry-secret
+      containers:
+      - name: order-processor-app
+        image: __UI_IMAGE_URI__
+        command: ["node", "kafka-microservice-consumer.js"]
+        env:
+        - name: SERVICE_NAME
+          value: "order-processor"
+        - name: PORT
+          value: "8081"
+        - name: KAFKA_BROKERS
+          value: "kafka-service:9092"
+        - name: KAFKA_TOPIC
+          value: "gke-utilization"
+        ports:
+        - containerPort: 8081
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "250m"
+            memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-processor
+spec:
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081
+  selector:
+    app: order-processor
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-gateway
+  template:
+    metadata:
+      labels:
+        app: payment-gateway
+    spec:
+      imagePullSecrets:
+      - name: artifact-registry-secret
+      containers:
+      - name: payment-gateway-app
+        image: __UI_IMAGE_URI__
+        command: ["node", "kafka-microservice-consumer.js"]
+        env:
+        - name: SERVICE_NAME
+          value: "payment-gateway"
+        - name: PORT
+          value: "8081"
+        - name: KAFKA_BROKERS
+          value: "kafka-service:9092"
+        - name: KAFKA_TOPIC
+          value: "gke-utilization"
+        ports:
+        - containerPort: 8081
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "250m"
+            memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-gateway
+spec:
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081
+  selector:
+    app: payment-gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-worker
+  template:
+    metadata:
+      labels:
+        app: notification-worker
+    spec:
+      imagePullSecrets:
+      - name: artifact-registry-secret
+      containers:
+      - name: notification-worker-app
+        image: __UI_IMAGE_URI__
+        command: ["node", "kafka-microservice-consumer.js"]
+        env:
+        - name: SERVICE_NAME
+          value: "notification-worker"
+        - name: PORT
+          value: "8081"
+        - name: KAFKA_BROKERS
+          value: "kafka-service:9092"
+        - name: KAFKA_TOPIC
+          value: "gke-utilization"
+        ports:
+        - containerPort: 8081
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "250m"
+            memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-worker
+spec:
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081
+  selector:
+    app: notification-worker

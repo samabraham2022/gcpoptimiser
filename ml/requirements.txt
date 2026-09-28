@@ -1,0 +1,7 @@
+google-cloud-bigquery>=3.10.0
+google-cloud-aiplatform>=1.35.0
+kfp>=2.0.0
+google-cloud-pipeline-components>=2.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=12.0.0
