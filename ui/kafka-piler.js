@@ -45,37 +45,52 @@ async function start() {
     let desiredRate = Number(process.env.PILE_RATE || process.env.INIT_PILER_RATE || 100);
     const bffUrl = process.env.BFF_URL || 'http://localhost:3000';
 
-    // Poll BFF for desired rate every 5s
-    setInterval(async () => {
+    // Fetch BFF desired rate immediately and poll every 5s
+    const fetchBffRate = async () => {
       try {
         const http = require('http');
-        http.get(`${bffUrl}/api/piler`, (res) => {
-          let data = '';
-          res.on('data', (chunk) => data += chunk);
-          res.on('end', () => {
-            try {
-              const obj = JSON.parse(data);
-              if (obj?.rate) desiredRate = Number(obj.rate);
-            } catch (e) { /* ignore */ }
-          });
-        }).on('error', () => {});
+        return await new Promise((resolve) => {
+          http.get(`${bffUrl}/api/piler`, (res) => {
+            let data = '';
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => {
+              try {
+                const obj = JSON.parse(data);
+                if (obj?.rate) resolve(Number(obj.rate));
+                else resolve(null);
+              } catch (e) { resolve(null); }
+            });
+          }).on('error', () => resolve(null));
+        });
+      } catch (e) { return null; }
+    };
+
+    (async () => {
+      const r = await fetchBffRate();
+      if (r) desiredRate = r;
+    })();
+
+    setInterval(async () => {
+      try {
+        const r = await fetchBffRate();
+        if (r) desiredRate = r;
       } catch (e) {}
     }, 5000);
 
-    // Emit messages at roughly desiredRate per second
+    // Emit messages at roughly desiredRate per second. Send all messages in one batch to avoid sequential awaits.
     setInterval(async () => {
       try {
-        // messages per service per interval (1s)
         const perService = Math.max(1, Math.round(desiredRate / services.length));
+        const allMsgs = [];
         for (let i = 0; i < services.length; i++) {
-          const msgs = [];
           for (let n = 0; n < perService; n++) {
             const payload = makePayload(services[i], i + n + Math.floor(Math.random() * 1000));
-            msgs.push({ value: JSON.stringify(payload) });
+            allMsgs.push({ value: JSON.stringify(payload) });
           }
-          if (msgs.length) {
-            await producer.send({ topic, messages: msgs });
-          }
+        }
+        if (allMsgs.length) {
+          await producer.send({ topic, messages: allMsgs });
+          console.log(`Piler sent ${allMsgs.length} messages (desiredRate=${desiredRate})`);
         }
       } catch (err) {
         console.error('Failed to publish Kafka telemetry message:', err.message);

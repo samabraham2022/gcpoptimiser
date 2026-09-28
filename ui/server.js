@@ -115,29 +115,33 @@ async function computeQueueDepthFromKafka() {
       return acc;
     }, {});
 
-    // For each service, fetch the committed offsets for its consumer group and sum the lag
+    // For each service, fetch the committed offsets for its consumer group and compute lag per partition
     let totalLag = 0;
+    const perGroup = {};
     for (const service of SERVICE_NAMES) {
       const groupId = `gke-${service}-group`;
       try {
         const groupOffsets = await admin.fetchOffsets({ groupId, topic: KAFKA_TOPIC });
         // groupOffsets: [{ partition: '0', offset: '42', metadata: null }, ...]
+        perGroup[groupId] = [];
         for (const p of groupOffsets) {
           const partition = Number(p.partition);
           const committed = Number(p.offset === '-1' ? 0 : p.offset);
           const latest = Number(latestPerPartition[partition] || 0);
           const lag = Math.max(0, latest - committed);
           totalLag += lag;
+          perGroup[groupId].push({ partition, committed, latest, lag });
         }
       } catch (e) {
-        // If group not found or fetch failed, ignore this group
-        continue;
+        // If group not found or fetch failed, record the error
+        perGroup[groupId] = { error: e.message || String(e) };
       }
     }
 
     await admin.disconnect();
-    return totalLag;
+    return { totalLag, perPartitionLatest: latestPerPartition, perGroup };
   } catch (err) {
+    console.warn('computeQueueDepthFromKafka failed:', err.message);
     return null;
   }
 }
@@ -151,7 +155,8 @@ function currentHttpsRate() {
 }
 
 function computeMessagesPerSecond(service) {
-  const windowMs = 15000;
+  // very short window (3s) for highly responsive throughput reporting
+  const windowMs = 3000;
   const now = Date.now();
   const arr = recentTimestampsByService.get(service) || [];
   while (arr.length && now - arr[0] > windowMs) {
@@ -173,16 +178,27 @@ app.use((req, res, next) => {
 
 app.get('/api/kafka-status', async (req, res) => {
   try {
-    const computedDepth = await computeQueueDepthFromKafka();
+    const computed = await computeQueueDepthFromKafka();
     // Sum messages/sec across services (computed from Kafka timestamps)
     const messagesPerSecond = SERVICE_NAMES.reduce((sum, s) => sum + computeMessagesPerSecond(s), 0);
+    let queueDepth = 0;
+    let diagnostics = null;
+    if (computed && typeof computed === 'object') {
+      queueDepth = computed.totalLag || 0;
+      diagnostics = { perPartitionLatest: computed.perPartitionLatest, perGroup: computed.perGroup };
+    } else if (computed === null) {
+      queueDepth = 0;
+    } else {
+      queueDepth = Number(computed || 0);
+    }
     res.json({
       service: 'kafka-message-piler',
       messagesPerSecond,
-      queueDepth: computedDepth !== null ? computedDepth : 0,
+      queueDepth,
       pilerRate,
       httpsRequestsServed: currentHttpsRate(),
-      computedFromKafka: computedDepth !== null
+      computedFromKafka: Boolean(diagnostics),
+      diagnostics
     });
   } catch (err) {
     res.json({
@@ -191,7 +207,8 @@ app.get('/api/kafka-status', async (req, res) => {
       queueDepth: 0,
       pilerRate,
       httpsRequestsServed: currentHttpsRate(),
-      computedFromKafka: false
+      computedFromKafka: false,
+      diagnostics: { error: err.message }
     });
   }
 });
