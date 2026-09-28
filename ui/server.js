@@ -337,18 +337,63 @@ try {
   console.warn('Kubernetes in-cluster config not found. Running with mock pods fallback.');
 }
 
+// Helper: parse CPU resource string like '250m' or '1' into numeric cores (float)
+function parseCpuResource(cpuStr) {
+  if (!cpuStr) return null;
+  cpuStr = String(cpuStr).trim();
+  if (cpuStr.endsWith('m')) {
+    const millicores = Number(cpuStr.slice(0, -1));
+    if (Number.isFinite(millicores)) return millicores / 1000.0;
+    return null;
+  }
+  const val = Number(cpuStr);
+  return Number.isFinite(val) ? val : null;
+}
+
+// Get the CPU limit (in cores) for the first pod matching the service name (label app=<service>)
+async function getPodCpuLimitForService(serviceName) {
+  if (!k8sApi) return null;
+  try {
+    const resp = await k8sApi.listNamespacedPod('default', undefined, undefined, undefined, undefined, `app=${serviceName}`);
+    const items = resp.body.items || [];
+    if (!items.length) return null;
+    // inspect the first pod's container resources limits
+    const pod = items[0];
+    const containers = pod.spec && pod.spec.containers ? pod.spec.containers : [];
+    if (!containers.length) return null;
+    const container = containers[0];
+    const limits = container.resources && container.resources.limits ? container.resources.limits : null;
+    if (!limits) return null;
+    const cpuLimit = limits.cpu || limits.CPU || null;
+    return parseCpuResource(cpuLimit);
+  } catch (err) {
+    console.warn('getPodCpuLimitForService failed:', err.message);
+    return null;
+  }
+}
+
 app.get('/api/live-metrics', async (req, res) => {
   const serviceMetrics = [];
   for (const service of SERVICE_NAMES) {
     const metricsFromService = await fetchServiceMetrics(service);
+    // attempt to get pod CPU limit (in cores) so we can cap displayed CPU to the container limit
+    const cpuLimitCores = await getPodCpuLimitForService(service).catch(() => null);
     if (metricsFromService) {
+      let reportedCpu = Number(metricsFromService.cpu);
+      if (cpuLimitCores != null && Number.isFinite(reportedCpu)) {
+        reportedCpu = Math.min(reportedCpu, cpuLimitCores);
+      }
+      const reportedMem = Number(metricsFromService.memory);
+      const cpuUtil = Number(metricsFromService.cpuUtilization ?? ((reportedCpu / (cpuLimitCores || 8)) * 100));
+      const ramUtil = Number(metricsFromService.ramUtilization ?? ((reportedMem / MAX_MEM) * 100));
+
       serviceMetrics.push({
         id: service,
         name: service.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-        cpu: Number(metricsFromService.cpu),
-        memory: Number(metricsFromService.memory),
-        cpuUtilization: Number(metricsFromService.cpuUtilization),
-        ramUtilization: Number(metricsFromService.ramUtilization),
+        cpu: Number.isFinite(reportedCpu) ? reportedCpu : null,
+        memory: Number.isFinite(reportedMem) ? reportedMem : null,
+        cpuUtilization: Number.isFinite(cpuUtil) ? cpuUtil : null,
+        ramUtilization: Number.isFinite(ramUtil) ? ramUtil : null,
         messagesPerSecond: Number(metricsFromService.messagesPerSecond || computeMessagesPerSecond(service)),
         requestsPerSecond: Number(metricsFromService.requestsPerSecond || 0),
         httpsRequestsServed: Number(metricsFromService.httpsRequestsServed || 0),
@@ -356,12 +401,16 @@ app.get('/api/live-metrics', async (req, res) => {
       });
     } else {
       const metrics = liveMetrics.get(service) || {};
+      let cpuVal = metrics.cpu ?? null;
+      if (cpuLimitCores != null && cpuVal != null) cpuVal = Math.min(cpuVal, cpuLimitCores);
+      const cpuUtilVal = metrics.cpuUtilization ?? (cpuVal != null ? (cpuVal / (cpuLimitCores || 8)) * 100 : null);
+
       serviceMetrics.push({
         id: service,
         name: service.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-        cpu: metrics.cpu ?? null,
+        cpu: cpuVal,
         memory: metrics.memory ?? null,
-        cpuUtilization: metrics.cpuUtilization ?? null,
+        cpuUtilization: cpuUtilVal,
         ramUtilization: metrics.ramUtilization ?? null,
         messagesPerSecond: computeMessagesPerSecond(service),
         requestsPerSecond: metrics.requestsPerSecond ?? null,
